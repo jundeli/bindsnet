@@ -4,14 +4,16 @@ from typing import Union, Optional, Sequence
 import torch
 import numpy as np
 
-from ..network.nodes import SRM0Nodes
-from ..network.topology import (
+import sys
+sys.path.append('../../bindsnet')
+from network.nodes import SRM0Nodes
+from network.topology import (
     AbstractConnection,
     Connection,
     Conv2dConnection,
     LocalConnection,
 )
-from ..utils import im2col_indices
+from utils import im2col_indices
 
 
 class LearningRule(ABC):

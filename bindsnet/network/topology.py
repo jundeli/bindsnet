@@ -7,6 +7,8 @@ from torch.nn import Module, Parameter
 import torch.nn.functional as F
 from torch.nn.modules.utils import _pair
 
+import sys
+sys.path.append('../../bindsnet')
 from .nodes import Nodes, CSRMNodes
 
 
@@ -56,7 +58,7 @@ class AbstractConnection(ABC, Module):
         self.weight_decay = weight_decay
         self.reduction = reduction
 
-        from ..learning import NoOp
+        from learning import NoOp
 
         self.update_rule = kwargs.get("update_rule", NoOp)
         self.wmin = kwargs.get("wmin", -np.inf)

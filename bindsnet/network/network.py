@@ -6,7 +6,9 @@ import torch
 from .monitors import AbstractMonitor
 from .nodes import Nodes, CSRMNodes
 from .topology import AbstractConnection
-from ..learning.reward import AbstractReward
+import sys
+sys.path.append('../../bindsnet')
+from learning.reward import AbstractReward
 
 
 def load(file_name: str, map_location: str = "cpu", learning: bool = None) -> "Network":

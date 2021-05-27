@@ -8,6 +8,9 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from time import time as t
+import sys
+sys.path.append('../../bindsnet')
+from network import Network
 
 from bindsnet import ROOT_DIR
 from bindsnet.datasets import MNIST, DataLoader
@@ -17,7 +20,7 @@ from bindsnet.evaluation import (
     proportion_weighting,
     assign_labels,
 )
-from bindsnet.models import DiehlAndCook2015
+# from bindsnet.models import DiehlAndCook2015
 from bindsnet.network.monitors import Monitor
 from bindsnet.utils import get_square_weights, get_square_assignments
 from bindsnet.analysis.plotting import (
@@ -28,6 +31,10 @@ from bindsnet.analysis.plotting import (
     plot_assignments,
     plot_voltages,
 )
+from typing import Optional, Union, Tuple, List, Sequence, Iterable
+from network.nodes import Input, LIFNodes, DiehlAndCookNodes, AdaptiveLIFNodes
+from network.topology import Connection, LocalConnection
+from learning import PostPre
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--seed", type=int, default=0)
@@ -35,9 +42,9 @@ parser.add_argument("--n_neurons", type=int, default=100)
 parser.add_argument("--batch_size", type=int, default=32)
 parser.add_argument("--n_epochs", type=int, default=1)
 parser.add_argument("--n_test", type=int, default=10000)
-parser.add_argument("--n_train", type=int, default=60000)
+parser.add_argument("--n_train", type=int, default=1000)
 parser.add_argument("--n_workers", type=int, default=-1)
-parser.add_argument("--update_steps", type=int, default=256)
+parser.add_argument("--update_steps", type=int, default=16)
 parser.add_argument("--exc", type=float, default=22.5)
 parser.add_argument("--inh", type=float, default=120)
 parser.add_argument("--theta_plus", type=float, default=0.05)
@@ -74,7 +81,6 @@ gpu = args.gpu
 
 update_interval = update_steps * batch_size
 
-device = "cpu"
 # Sets up Gpu use
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 if gpu and torch.cuda.is_available():
@@ -88,6 +94,121 @@ else:
 torch.set_num_threads(os.cpu_count() - 1)
 print("Running on Device = ", device)
 
+class DiehlAndCook2015(Network):
+    # language=rst
+    """
+    Implements the spiking neural network architecture from `(Diehl & Cook 2015)
+    <https://www.frontiersin.org/articles/10.3389/fncom.2015.00099/full>`_.
+    """
+
+    def __init__(
+        self,
+        n_inpt: int,
+        n_neurons: int = 100,
+        exc: float = 22.5,
+        inh: float = 17.5,
+        dt: float = 1.0,
+        nu: Optional[Union[float, Sequence[float]]] = (1e-4, 1e-2),
+        reduction: Optional[callable] = None,
+        wmin: float = 0.0,
+        wmax: float = 1.0,
+        norm: float = 78.4,
+        theta_plus: float = 0.05,
+        tc_theta_decay: float = 1e7,
+        inpt_shape: Optional[Iterable[int]] = None,
+    ) -> None:
+        # language=rst
+        """
+        Constructor for class ``DiehlAndCook2015``.
+
+        :param n_inpt: Number of input neurons. Matches the 1D size of the input data.
+        :param n_neurons: Number of excitatory, inhibitory neurons.
+        :param exc: Strength of synapse weights from excitatory to inhibitory layer.
+        :param inh: Strength of synapse weights from inhibitory to excitatory layer.
+        :param dt: Simulation time step.
+        :param nu: Single or pair of learning rates for pre- and post-synaptic events,
+            respectively.
+        :param reduction: Method for reducing parameter updates along the minibatch
+            dimension.
+        :param wmin: Minimum allowed weight on input to excitatory synapses.
+        :param wmax: Maximum allowed weight on input to excitatory synapses.
+        :param norm: Input to excitatory layer connection weights normalization
+            constant.
+        :param theta_plus: On-spike increment of ``DiehlAndCookNodes`` membrane
+            threshold potential.
+        :param tc_theta_decay: Time constant of ``DiehlAndCookNodes`` threshold
+            potential decay.
+        :param inpt_shape: The dimensionality of the input layer.
+        """
+        super().__init__(dt=dt)
+
+        self.n_inpt = n_inpt
+        self.inpt_shape = inpt_shape
+        self.n_neurons = n_neurons
+        self.exc = exc
+        self.inh = inh
+        self.dt = dt
+
+        # Layers
+        input_layer = Input(
+            n=self.n_inpt, shape=self.inpt_shape, traces=True, tc_trace=20.0
+        )
+        exc_layer = DiehlAndCookNodes(
+            n=self.n_neurons,
+            traces=True,
+            rest=-65.0,
+            reset=-60.0,
+            thresh=-52.0,
+            refrac=5,
+            tc_decay=100.0,
+            tc_trace=20.0,
+            theta_plus=theta_plus,
+            tc_theta_decay=tc_theta_decay,
+        )
+        inh_layer = LIFNodes(
+            n=self.n_neurons,
+            traces=False,
+            rest=-60.0,
+            reset=-45.0,
+            thresh=-40.0,
+            tc_decay=10.0,
+            refrac=2,
+            tc_trace=20.0,
+        )
+
+        # Connections
+        w = 0.3 * torch.rand(self.n_inpt, self.n_neurons)
+        input_exc_conn = Connection(
+            source=input_layer,
+            target=exc_layer,
+            w=w,
+            update_rule=PostPre,
+            nu=nu,
+            reduction=reduction,
+            wmin=wmin,
+            wmax=wmax,
+            norm=norm,
+        )
+        w = self.exc * torch.diag(torch.ones(self.n_neurons))
+        exc_inh_conn = Connection(
+            source=exc_layer, target=inh_layer, w=w, wmin=0, wmax=self.exc
+        )
+        w = -self.inh * (
+            torch.ones(self.n_neurons, self.n_neurons)
+            - torch.diag(torch.ones(self.n_neurons))
+        )
+        inh_exc_conn = Connection(
+            source=inh_layer, target=exc_layer, w=w, wmin=-self.inh, wmax=0
+        )
+
+        # Add to network
+        self.add_layer(input_layer, name="X")
+        self.add_layer(exc_layer, name="Ae")
+        self.add_layer(inh_layer, name="Ai")
+        self.add_connection(input_exc_conn, source="X", target="Ae")
+        self.add_connection(exc_inh_conn, source="Ae", target="Ai")
+        self.add_connection(inh_exc_conn, source="Ai", target="Ae")
+        
 # Determines number of workers to use
 if n_workers == -1:
     n_workers = gpu * 4 * torch.cuda.device_count()
@@ -111,7 +232,7 @@ network = DiehlAndCook2015(
 # Directs network to GPU
 if gpu:
     network.to("cuda")
-
+    
 # Load MNIST data.
 dataset = MNIST(
     PoissonEncoder(time=time, dt=dt),
@@ -298,77 +419,3 @@ for epoch in range(n_epochs):
 
 print("Progress: %d / %d (%.4f seconds)" % (epoch + 1, n_epochs, t() - start))
 print("Training complete.\n")
-
-# Load MNIST data.
-test_dataset = MNIST(
-    PoissonEncoder(time=time, dt=dt),
-    None,
-    root=os.path.join(ROOT_DIR, "data", "MNIST"),
-    download=True,
-    train=False,
-    transform=transforms.Compose(
-        [transforms.ToTensor(), transforms.Lambda(lambda x: x * intensity)]
-    ),
-)
-
-# Create a dataloader to iterate and batch data
-test_dataloader = DataLoader(
-    test_dataset,
-    batch_size=batch_size,
-    shuffle=True,
-    num_workers=n_workers,
-    pin_memory=gpu,
-)
-
-# Sequence of accuracy estimates.
-accuracy = {"all": 0, "proportion": 0}
-
-# Train the network.
-print("\nBegin testing\n")
-network.train(mode=False)
-start = t()
-
-pbar = tqdm(total=n_test)
-for step, batch in enumerate(test_dataset):
-    if step > n_test:
-        break
-    # Get next input sample.
-    inputs = {"X": batch["encoded_image"]}
-    if gpu:
-        inputs = {k: v.cuda() for k, v in inputs.items()}
-
-    # Run the network on the input.
-    network.run(inputs=inputs, time=time, input_time_dim=1)
-
-    # Add to spikes recording.
-    spike_record = spikes["Ae"].get("s").permute((1, 0, 2))
-
-    # Convert the array of labels into a tensor
-    label_tensor = torch.tensor(batch["label"], device=device)
-
-    # Get network predictions.
-    all_activity_pred = all_activity(
-        spikes=spike_record, assignments=assignments, n_labels=n_classes
-    )
-    proportion_pred = proportion_weighting(
-        spikes=spike_record,
-        assignments=assignments,
-        proportions=proportions,
-        n_labels=n_classes,
-    )
-
-    # Compute network accuracy according to available classification strategies.
-    accuracy["all"] += float(torch.sum(label_tensor.long() == all_activity_pred).item())
-    accuracy["proportion"] += float(
-        torch.sum(label_tensor.long() == proportion_pred).item()
-    )
-
-    network.reset_state_variables()  # Reset state variables.
-    pbar.set_description_str("Test progress: ")
-    pbar.update()
-
-print("\nAll activity accuracy: %.2f" % (accuracy["all"] / n_test))
-print("Proportion weighting accuracy: %.2f \n" % (accuracy["proportion"] / n_test))
-
-print("Progress: %d / %d (%.4f seconds)" % (epoch + 1, n_epochs, t() - start))
-print("Testing complete.\n")
