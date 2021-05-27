@@ -141,3 +141,4 @@ If you use BindsNET in your research, please cite the following [article](https:
 GNU Affero General Public License v3.0
 
 
+# bindsnet
